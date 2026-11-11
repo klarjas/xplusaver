@@ -58,13 +58,11 @@ def is_public_http_url(raw_url: str) -> bool:
 
 
 def download_video(url: str, folder: str) -> Path:
-    output_template = str(Path(folder) / "%(title).100s-%(id)s.%(ext)s")
-    options = {
+    base_options = {
         # Try a ready-made MP4 first; otherwise combine compatible MP4 video
         # and M4A audio streams. FFmpeg is installed by Render via apt.txt.
         "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
         "merge_output_format": "mp4",
-        "outtmpl": output_template,
         "noplaylist": True,
         "max_filesize": MAX_FILE_BYTES,
         "socket_timeout": 25,
@@ -81,23 +79,53 @@ def download_video(url: str, folder: str) -> Path:
         # Intentionally no cookies, browser profiles, credentials, or access-control bypass.
     }
 
-    with yt_dlp.YoutubeDL(options) as ydl:
-        ydl.extract_info(url, download=True)
+    host = (urlparse(url).hostname or "").lower()
+    is_x_url = host == "x.com" or host.endswith(".x.com") or host in {
+        "twitter.com", "www.twitter.com", "mobile.twitter.com"
+    }
+    attempts = [("default", {})]
+    if is_x_url:
+        # X's syndication endpoint can expose public media that the GraphQL
+        # endpoint intermittently fails to return. This is a fallback only.
+        attempts.append(("x-syndication", {
+            "extractor_args": {"twitter": {"api": ["syndication"]}}
+        }))
 
-    candidates = [
-        path for path in Path(folder).iterdir()
-        if path.is_file() and path.suffix.lower() in {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
-    ]
-    if not candidates:
-        raise RuntimeError(
-            "មិនរកឃើញឯកសារវីដេអូទេ។ Website នេះអាចមិនមាន Extractor ដែលគាំទ្រ "
-            "ឬប្រើ Stream ដែលមិនអាចចូលប្រើដោយសាធារណៈ។"
-        )
+    last_error = None
+    for attempt_name, extra_options in attempts:
+        attempt_dir = Path(folder) / attempt_name
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        options = {
+            **base_options,
+            **extra_options,
+            "outtmpl": str(attempt_dir / "%(title).100s-%(id)s.%(ext)s"),
+        }
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                ydl.extract_info(url, download=True)
+        except yt_dlp.utils.DownloadError as exc:
+            last_error = exc
+            logger.warning("Download attempt %s failed: %s", attempt_name, exc)
+            continue
 
-    result = max(candidates, key=lambda item: item.stat().st_mtime)
-    if result.stat().st_size > MAX_FILE_BYTES:
-        raise RuntimeError("វីដេអូធំជាង 48 MB ដែល Bot អាចផ្ញើបាន។")
-    return result
+        candidates = [
+            path for path in attempt_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {
+                ".mp4", ".m4v", ".mov", ".webm", ".mkv"
+            }
+        ]
+        if candidates:
+            result = max(candidates, key=lambda item: item.stat().st_mtime)
+            if result.stat().st_size > MAX_FILE_BYTES:
+                raise RuntimeError("វីដេអូធំជាង 48 MB ដែល Bot អាចផ្ញើបាន។")
+            return result
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(
+        "មិនរកឃើញឯកសារវីដេអូទេ។ Website នេះអាចមិនមាន Extractor ដែលគាំទ្រ "
+        "ឬប្រើ Stream ដែលមិនអាចចូលប្រើដោយសាធារណៈ។"
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
