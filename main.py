@@ -158,11 +158,20 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 )
             await status.delete()
         except yt_dlp.utils.DownloadError as exc:
-            logger.info("Download failed: %s", exc)
-            await status.edit_text(
-                "មិនអាចទាញយក Link នេះបានទេ។ Website អាចមិនគាំទ្រ, Link អាចផុតកំណត់ "
-                "ឬវីដេអូមិនអាចចូលប្រើជាសាធារណៈ។ Bot មិនប្រើ Cookies/Login ដើម្បីរំលងការការពារទេ។"
-            )
+            error_text = str(exc)
+            logger.info("Download failed: %s", error_text)
+            if "No video could be found in this tweet" in error_text:
+                user_error = (
+                    "X/Twitter មាន Post នេះ ប៉ុន្តែ yt-dlp មិនអាចទទួលបានប្រភពវីដេអូទេ។ "
+                    "អាចបណ្តាលមកពី X តម្រូវឱ្យ Login ឬមិនបង្ហាញ Media ទៅកាន់ការទាញយកសាធារណៈ។ "
+                    "សូមពិនិត្យថា Post អាចមើលបានជាសាធារណៈ និងសាកល្បងម្ដងទៀតក្រោយ Update។"
+                )
+            else:
+                user_error = (
+                    "មិនអាចទាញយក Link នេះបានទេ។ Website អាចមិនគាំទ្រ, Link អាចផុតកំណត់ "
+                    "ឬវីដេអូមិនអាចចូលប្រើជាសាធារណៈ។ Bot មិនប្រើ Cookies/Login ដើម្បីរំលងការការពារទេ។"
+                )
+            await status.edit_text(user_error)
         except Exception as exc:
             logger.exception("Video processing failed")
             safe_message = str(exc)
