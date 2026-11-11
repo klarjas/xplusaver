@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -67,7 +68,37 @@ def resolve_filecoster_video(page_url: str, folder: str) -> Path:
     """Open a public FileCoster page and capture its public MP4 response."""
     captured = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        launch_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-zygote",
+            "--single-process",
+        ]
+        try:
+            browser = p.chromium.launch(
+                headless=True, args=launch_args, timeout=60000
+            )
+        except Exception as launch_error:
+            # Render may occasionally start a deploy without the Playwright
+            # browser cache. Install the matching browser once, then retry.
+            error_text = str(launch_error).lower()
+            if "executable doesn't exist" in error_text or "browser has been closed" in error_text:
+                logger.warning("Chromium binary unavailable; installing Playwright Chromium.")
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    check=True, timeout=240,
+                )
+                browser = p.chromium.launch(
+                    headless=True, args=launch_args, timeout=60000
+                )
+            else:
+                raise RuntimeError(
+                    "Chromium មិនអាចបើកបាននៅលើ Render។ "
+                    "សូមពិនិត្យ Build Command ឱ្យមាន "
+                    "'playwright install --with-deps chromium'។ "
+                    f"ព័ត៌មានបច្ចេកទេស: {str(launch_error)[:500]}"
+                ) from launch_error
         context = browser.new_context(
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
             accept_downloads=False,
