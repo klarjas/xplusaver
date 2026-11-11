@@ -64,8 +64,8 @@ def is_public_http_url(raw_url: str) -> bool:
 
 
 
-def resolve_filecoster_video(page_url: str, folder: str) -> Path:
-    """Open a public FileCoster page and capture its public MP4 response."""
+def resolve_browser_media(page_url: str, folder: str) -> Path:
+    """IDM-style fallback: inspect public browser network responses for direct MP4 media."""
     captured = []
     with sync_playwright() as p:
         launch_args = [
@@ -73,18 +73,15 @@ def resolve_filecoster_video(page_url: str, folder: str) -> Path:
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--no-zygote",
-            "--single-process",
         ]
         try:
             browser = p.chromium.launch(
                 headless=True, args=launch_args, timeout=60000
             )
         except Exception as launch_error:
-            # Render may occasionally start a deploy without the Playwright
-            # browser cache. Install the matching browser once, then retry.
             error_text = str(launch_error).lower()
-            if "executable doesn't exist" in error_text or "browser has been closed" in error_text:
-                logger.warning("Chromium binary unavailable; installing Playwright Chromium.")
+            if "executable doesn't exist" in error_text:
+                logger.warning("Playwright Chromium binary unavailable; installing Chromium.")
                 subprocess.run(
                     [sys.executable, "-m", "playwright", "install", "chromium"],
                     check=True, timeout=240,
@@ -94,29 +91,42 @@ def resolve_filecoster_video(page_url: str, folder: str) -> Path:
                 )
             else:
                 raise RuntimeError(
-                    "Chromium មិនអាចបើកបាននៅលើ Render។ "
-                    "សូមពិនិត្យ Build Command ឱ្យមាន "
-                    "'playwright install --with-deps chromium'។ "
-                    f"ព័ត៌មានបច្ចេកទេស: {str(launch_error)[:500]}"
+                    "Browser Detector មិនអាចបើក Chromium បានទេ។ "
+                    "សូមពិនិត្យ Render Build Command: "
+                    "'pip install -r requirements.txt && playwright install --with-deps chromium'។ "
+                    f"ព័ត៌មាន: {str(launch_error)[:350]}"
                 ) from launch_error
+
         context = browser.new_context(
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
             accept_downloads=False,
         )
+
+        # Block non-public destinations to reduce the risk of browser-based SSRF.
+        def guard_request(route):
+            try:
+                if is_public_http_url(route.request.url):
+                    route.continue_()
+                else:
+                    route.abort()
+            except Exception:
+                route.abort()
+
+        context.route("**/*", guard_request)
         page = context.new_page()
 
         def on_response(response):
             try:
                 response_url = response.url
+                if not is_public_http_url(response_url):
+                    return
                 parsed = urlparse(response_url)
-                headers = response.headers
-                content_type = headers.get("content-type", "").lower()
-                if (
-                    parsed.scheme in {"http", "https"}
-                    and parsed.hostname
-                    and (parsed.hostname == "overfetch.video" or parsed.hostname.endswith(".overfetch.video"))
-                    and ("video/mp4" in content_type or response_url.lower().split("?")[0].endswith(".mp4"))
-                ):
+                content_type = response.headers.get("content-type", "").lower()
+                is_mp4 = (
+                    "video/mp4" in content_type
+                    or parsed.path.lower().endswith(".mp4")
+                )
+                if is_mp4:
                     captured.append(response_url)
             except Exception:
                 pass
@@ -125,15 +135,19 @@ def resolve_filecoster_video(page_url: str, folder: str) -> Path:
         try:
             page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(2500)
-            # Try native video playback and visible play controls; no login or
-            # access-control bypass is attempted.
             page.evaluate("""() => {
-                const v = document.querySelector('video');
-                if (v) { v.muted = true; const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+                for (const v of document.querySelectorAll('video')) {
+                    v.muted = true;
+                    const p = v.play();
+                    if (p && p.catch) p.catch(() => {});
+                }
             }""")
-            for selector in ["video", "button[aria-label*='play' i]", ".vjs-big-play-button", ".plyr__control--overlaid"]:
+            for selector in [
+                "video", "button[aria-label*='play' i]",
+                ".vjs-big-play-button", ".plyr__control--overlaid"
+            ]:
                 try:
-                    page.locator(selector).first.click(timeout=1500)
+                    page.locator(selector).first.click(timeout=1200)
                 except Exception:
                     pass
             page.wait_for_timeout(9000)
@@ -143,17 +157,20 @@ def resolve_filecoster_video(page_url: str, folder: str) -> Path:
 
     if not captured:
         raise RuntimeError(
-            "FileCoster មិនបានបង្ហាញ Direct MP4 ទៅកាន់ Browser ទេ។ "
-            "វាអាចត្រូវការ Login ឬប្រើប្រព័ន្ធ Stream ដែលមិនគាំទ្រ។"
+            "IDM Auto Mode រកមិនឃើញ Direct MP4 ក្នុង Network ទេ។ "
+            "Website អាចប្រើ Login, DRM, HLS/DASH ឬមិនបង្ហាញវីដេអូដោយស្វ័យប្រវត្តិ។"
         )
 
     media_url = captured[-1]
-    target = Path(folder) / "filecoster-video.mp4"
+    if not is_public_http_url(media_url):
+        raise RuntimeError("ប្រភព Media មិនអនុញ្ញាតសម្រាប់សុវត្ថិភាពទេ។")
+
+    target = Path(folder) / "browser-detected-video.mp4"
     request = urllib.request.Request(
         media_url,
         headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-            "Referer": "https://filecoster.com/",
+            "Referer": page_url,
             "Accept": "*/*",
         },
     )
@@ -174,8 +191,7 @@ def resolve_filecoster_video(page_url: str, folder: str) -> Path:
     if total <= MAX_FILE_BYTES:
         return target
 
-    # Telegram Bot API upload limit: compress oversized public MP4 to <=48 MiB.
-    compressed = Path(folder) / "filecoster-compressed.mp4"
+    compressed = Path(folder) / "browser-detected-compressed.mp4"
     for crf in ("27", "31", "34"):
         subprocess.run(
             [
@@ -194,10 +210,6 @@ def resolve_filecoster_video(page_url: str, folder: str) -> Path:
 
 
 def download_video(url: str, folder: str) -> Path:
-    host = (urlparse(url).hostname or "").lower()
-    if host == "filecoster.com" or host.endswith(".filecoster.com"):
-        return resolve_filecoster_video(url, folder)
-
     base_options = {
         # Try a ready-made MP4 first; otherwise combine compatible MP4 video
         # and M4A audio streams. FFmpeg is installed by Render via apt.txt.
@@ -260,12 +272,18 @@ def download_video(url: str, folder: str) -> Path:
                 raise RuntimeError("វីដេអូធំជាង 48 MB ដែល Bot អាចផ្ញើបាន។")
             return result
 
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError(
-        "មិនរកឃើញឯកសារវីដេអូទេ។ Website នេះអាចមិនមាន Extractor ដែលគាំទ្រ "
-        "ឬប្រើ Stream ដែលមិនអាចចូលប្រើដោយសាធារណៈ។"
-    )
+    # IDM-style fallback: open the public page, inspect network responses,
+    # and download a direct MP4 if the page exposes one without authentication.
+    try:
+        return resolve_browser_media(url, folder)
+    except Exception as browser_error:
+        logger.warning("Browser media detection failed: %s", browser_error)
+        if last_error is not None:
+            raise RuntimeError(
+                "វិធី Extractor និង IDM Auto Detector សុទ្ធតែមិនអាចទាញយកបាន។ "
+                f"មូលហេតុចុងក្រោយ: {str(browser_error)[:300]}"
+            ) from browser_error
+        raise
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
