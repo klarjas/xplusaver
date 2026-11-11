@@ -147,17 +147,21 @@ def download_public_manifest(manifest_url: str, page_url: str, folder: str) -> P
 
     target = Path(folder) / "stream-download.mp4"
     headers = f"User-Agent: {user_agent}\r\nReferer: {referer}\r\n"
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-headers", headers,
-            "-protocol_whitelist", "http,https,tcp,tls,crypto,data",
-            "-i", manifest_url, "-map", "0:v:0?", "-map", "0:a:0?",
-            "-c", "copy", "-movflags", "+faststart",
-            "-fs", str(1024 * 1024 * 1024), str(target),
-        ],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        timeout=MAX_DOWNLOAD_SECONDS,
-    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-headers", headers,
+                "-protocol_whitelist", "http,https,tcp,tls,crypto,data",
+                "-i", manifest_url, "-map", "0:v:0?", "-map", "0:a:0?",
+                "-c", "copy", "-movflags", "+faststart",
+                "-fs", str(1024 * 1024 * 1024), str(target),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=MAX_DOWNLOAD_SECONDS,
+        )
+    except subprocess.CalledProcessError as exc:
+        details = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
+        raise RuntimeError("FFmpeg HLS/DASH error: " + details[-1200:]) from exc
     if not target.exists() or target.stat().st_size == 0:
         raise RuntimeError("FFmpeg មិនបានបង្កើតឯកសារវីដេអូទេ។")
     return _compress_for_telegram(target, folder)
@@ -193,7 +197,7 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
                 raise RuntimeError(
                     "Browser Detector មិនអាចបើក Chromium បានទេ។ "
                     "សូមពិនិត្យ Render Build Command: "
-                    "'pip install -r requirements.txt && playwright install --with-deps chromium'។ "
+                    "'pip install -r requirements.txt && python -m playwright install chromium'។ "
                     f"ព័ត៌មាន: {str(launch_error)[:350]}"
                 ) from launch_error
 
