@@ -166,11 +166,15 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
         raise RuntimeError("ប្រភព Media មិនអនុញ្ញាតសម្រាប់សុវត្ថិភាពទេ។")
 
     target = Path(folder) / "browser-detected-video.mp4"
+    page_parts = urlparse(page_url)
+    # Match the site-root Referer used by FileCoster's browser media request.
+    # Some public file hosts reject the full /d/<id> page URL as a hotlink Referer.
+    page_referer = f"{page_parts.scheme}://{page_parts.netloc}/"
     request = urllib.request.Request(
         media_url,
         headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-            "Referer": page_url,
+            "Referer": page_referer,
             "Accept": "*/*",
         },
     )
