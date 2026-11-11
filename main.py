@@ -346,7 +346,7 @@ def download_idm_direct_link(media_url: str, folder: str):
                 raise RuntimeError("IDM Link បញ្ជូនទៅ URL មិនមានសុវត្ថិភាពទេ។")
             content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             disposition = response.headers.get("Content-Disposition", "")
-            filename_match = re.search(r"filename\\*?=(?:UTF-8''|)[\"']?([^\"';]+)", disposition, re.I)
+            filename_match = re.search(r"filename[^=]*=[\"']?([^\"';]+)", disposition, re.I)
             if filename_match:
                 disposition_ext = Path(filename_match.group(1)).suffix.lower()
             is_media = content_type.startswith("video/") or (
@@ -394,7 +394,7 @@ def download_idm_direct_link(media_url: str, folder: str):
         response_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if not response_type.startswith("video/") and response_type not in {
             "application/octet-stream", "application/mp4"
-        } and suffix not in allowed_exts:
+        }:
             raise RuntimeError("Link មិនបានបញ្ជូនឯកសារវីដេអូទេ។")
         while True:
             chunk = response.read(1024 * 1024)
