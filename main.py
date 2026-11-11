@@ -314,7 +314,109 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
 
 
 
+
+def download_idm_direct_link(media_url: str, folder: str):
+    """Download a user-supplied public direct media URL, as copied from IDM."""
+    if not is_public_http_url(media_url):
+        raise RuntimeError("IDM URL មិនមានសុវត្ថិភាព ឬមិនមែនជា HTTP/HTTPS ទេ។")
+
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    )
+    parsed = urlparse(media_url)
+    path_ext = Path(parsed.path).suffix.lower()
+    allowed_exts = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".ts"}
+    disposition_ext = ""
+
+    # Probe with a one-byte Range request so a large file is not downloaded twice.
+    probe = urllib.request.Request(
+        media_url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Range": "bytes=0-0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(probe, timeout=30) as response:
+            final_url = response.geturl()
+            if not is_public_http_url(final_url):
+                raise RuntimeError("IDM Link បញ្ជូនទៅ URL មិនមានសុវត្ថិភាពទេ។")
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            disposition = response.headers.get("Content-Disposition", "")
+            filename_match = re.search(r"filename\\*?=(?:UTF-8''|)[\"']?([^\"';]+)", disposition, re.I)
+            if filename_match:
+                disposition_ext = Path(filename_match.group(1)).suffix.lower()
+            is_media = content_type.startswith("video/") or (
+                content_type in {"application/octet-stream", "application/mp4"}
+                and (path_ext in allowed_exts or disposition_ext in allowed_exts)
+            )
+            if not is_media and path_ext not in allowed_exts and disposition_ext not in allowed_exts:
+                return None
+            content_range = response.headers.get("Content-Range", "")
+            if "/" in content_range:
+                try:
+                    total_size = int(content_range.rsplit("/", 1)[1])
+                    if total_size > 1024 * 1024 * 1024:
+                        raise RuntimeError("IDM Video ធំជាង 1 GB; បញ្ឈប់ដើម្បីការពារ Disk។")
+                except ValueError:
+                    pass
+            elif response.status == 200:
+                length = response.headers.get("Content-Length")
+                if length and int(length) > 1024 * 1024 * 1024:
+                    raise RuntimeError("IDM Video ធំជាង 1 GB; បញ្ឈប់ដើម្បីការពារ Disk។")
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403, 404, 410, 416}:
+            raise RuntimeError(
+                f"IDM Direct Link មិនអាចចូលប្រើបាន (HTTP {exc.code})។ "
+                "Link អាចផុតកំណត់ ឬ Server ត្រូវការ Referer/Session ដែលមានសិទ្ធិ។"
+            ) from exc
+        raise
+
+    suffix = path_ext if path_ext in allowed_exts else (
+        disposition_ext if disposition_ext in allowed_exts else ".mp4"
+    )
+    target = Path(folder) / ("idm-direct-download" + suffix)
+    request = urllib.request.Request(
+        media_url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+        },
+    )
+    total = 0
+    with urllib.request.urlopen(request, timeout=45) as response, target.open("wb") as output:
+        if not is_public_http_url(response.geturl()):
+            raise RuntimeError("IDM Link Redirect មិនមានសុវត្ថិភាពទេ។")
+        response_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if not response_type.startswith("video/") and response_type not in {
+            "application/octet-stream", "application/mp4"
+        } and suffix not in allowed_exts:
+            raise RuntimeError("Link មិនបានបញ្ជូនឯកសារវីដេអូទេ។")
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 1024 * 1024 * 1024:
+                raise RuntimeError("IDM Video ធំជាង 1 GB; បញ្ឈប់ដើម្បីការពារ Disk។")
+            output.write(chunk)
+
+    if total == 0:
+        raise RuntimeError("IDM Link មិនបានបញ្ជូនទិន្នន័យវីដេអូទេ។")
+    logger.info("IDM direct media downloaded: %s bytes, type=%s", total, content_type)
+    return _compress_for_telegram(target, folder)
+
+
 def download_video(url: str, folder: str) -> Path:
+    # First try the direct media URL copied from IDM.
+    direct_result = download_idm_direct_link(url, folder)
+    if direct_result is not None:
+        return direct_result
+
     base_options = {
         "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
         "merge_output_format": "mp4",
