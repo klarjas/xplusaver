@@ -211,8 +211,6 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
 
 def download_video(url: str, folder: str) -> Path:
     base_options = {
-        # Try a ready-made MP4 first; otherwise combine compatible MP4 video
-        # and M4A audio streams. FFmpeg is installed by Render via apt.txt.
         "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -228,7 +226,7 @@ def download_video(url: str, folder: str) -> Path:
         "cachedir": False,
         "hls_prefer_native": True,
         "format_sort": ["res:720", "ext:mp4:m4a"],
-        # Intentionally no cookies, browser profiles, credentials, or access-control bypass.
+        # No cookies, browser profiles, credentials, or access-control bypass.
     }
 
     host = (urlparse(url).hostname or "").lower()
@@ -237,8 +235,6 @@ def download_video(url: str, folder: str) -> Path:
     }
     attempts = [("default", {})]
     if is_x_url:
-        # X's syndication endpoint can expose public media that the GraphQL
-        # endpoint intermittently fails to return. This is a fallback only.
         attempts.append(("x-syndication", {
             "extractor_args": {"twitter": {"api": ["syndication"]}}
         }))
@@ -272,18 +268,16 @@ def download_video(url: str, folder: str) -> Path:
                 raise RuntimeError("វីដេអូធំជាង 48 MB ដែល Bot អាចផ្ញើបាន។")
             return result
 
-    # IDM-style fallback: open the public page, inspect network responses,
-    # and download a direct MP4 if the page exposes one without authentication.
+    # IDM-style fallback runs only after all extractor attempts fail.
     try:
         return resolve_browser_media(url, folder)
     except Exception as browser_error:
         logger.warning("Browser media detection failed: %s", browser_error)
-        if last_error is not None:
-            raise RuntimeError(
-                "វិធី Extractor និង IDM Auto Detector សុទ្ធតែមិនអាចទាញយកបាន។ "
-                f"មូលហេតុចុងក្រោយ: {str(browser_error)[:300]}"
-            ) from browser_error
-        raise
+        raise RuntimeError(
+            "វិធី Extractor និង IDM Auto Detector សុទ្ធតែមិនអាចទាញយកបាន។ "
+            f"មូលហេតុចុងក្រោយ: {str(browser_error)[:300]}"
+        ) from browser_error
+
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
