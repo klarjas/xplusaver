@@ -64,9 +64,108 @@ def is_public_http_url(raw_url: str) -> bool:
 
 
 
+
+def _validate_manifest(manifest_url: str, page_referer: str, user_agent: str) -> None:
+    """Allow only public, unencrypted HLS/DASH manifests before handing them to FFmpeg."""
+    request = urllib.request.Request(
+        manifest_url,
+        headers={"User-Agent": user_agent, "Referer": page_referer, "Accept": "*/*"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        final_url = response.geturl()
+        if not is_public_http_url(final_url):
+            raise RuntimeError("Manifest redirect មិនមានសុវត្ថិភាពទេ។")
+        content = response.read(5 * 1024 * 1024 + 1)
+    if len(content) > 5 * 1024 * 1024:
+        raise RuntimeError("Manifest ធំពេកសម្រាប់ការត្រួតពិនិត្យ។")
+    text = content.decode("utf-8", errors="replace")
+    lower = text.lower()
+
+    if "#extm3u" in lower:
+        # Do not fetch encrypted HLS keys or DRM-protected streams.
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.upper().startswith("#EXT-X-KEY:") and "METHOD=NONE" not in stripped.upper():
+                raise RuntimeError("HLS នេះប្រើ Encryption/Key; Bot មិនរំលងការការពារនេះទេ។")
+            if stripped and not stripped.startswith("#"):
+                candidate = urllib.parse.urljoin(final_url, stripped)
+                if not is_public_http_url(candidate):
+                    raise RuntimeError("HLS មាន Segment URL មិនមានសុវត្ថិភាព។")
+        for match in re.findall(r'URI="([^"]+)"', text, flags=re.IGNORECASE):
+            candidate = urllib.parse.urljoin(final_url, match)
+            if not is_public_http_url(candidate):
+                raise RuntimeError("HLS មាន URI មិនមានសុវត្ថិភាព។")
+        return
+
+    if "<mpd" in lower:
+        if "contentprotection" in lower:
+            raise RuntimeError("DASH នេះមាន ContentProtection/DRM; មិនអាចទាញយកបានទេ។")
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(text)
+            for element in root.iter():
+                if element.tag.rsplit("}", 1)[-1].lower() == "baseurl" and element.text:
+                    candidate = urllib.parse.urljoin(final_url, element.text.strip())
+                    if not is_public_http_url(candidate):
+                        raise RuntimeError("DASH មាន BaseURL មិនមានសុវត្ថិភាព។")
+        except ET.ParseError as exc:
+            raise RuntimeError("DASH Manifest មិនត្រឹមត្រូវ។") from exc
+        return
+
+    raise RuntimeError("Response ដែលចាប់បានមិនមែនជា HLS ឬ DASH Manifest ទេ.")
+
+
+def _compress_for_telegram(source: Path, folder: str) -> Path:
+    if source.stat().st_size <= MAX_FILE_BYTES:
+        return source
+    compressed = Path(folder) / "compressed-for-telegram.mp4"
+    for crf in ("27", "31", "34"):
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(source), "-vf", "scale='min(1280,iw)':-2",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
+                "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+                "-fs", str(MAX_FILE_BYTES), str(compressed),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=MAX_DOWNLOAD_SECONDS,
+        )
+        if compressed.exists() and compressed.stat().st_size <= MAX_FILE_BYTES:
+            return compressed
+    raise RuntimeError("វីដេអូធំពេក ហើយមិនអាចបង្ហាប់ឱ្យតូចជាង 48 MB បានទេ។")
+
+
+def download_public_manifest(manifest_url: str, page_url: str, folder: str) -> Path:
+    """Download public, unencrypted HLS/DASH with FFmpeg; no cookies or auth bypass."""
+    user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    parsed = urlparse(page_url)
+    referer = f"{parsed.scheme}://{parsed.netloc}/"
+    if not is_public_http_url(manifest_url):
+        raise RuntimeError("Manifest URL មិនអនុញ្ញាតសម្រាប់សុវត្ថិភាពទេ។")
+    _validate_manifest(manifest_url, referer, user_agent)
+
+    target = Path(folder) / "stream-download.mp4"
+    headers = f"User-Agent: {user_agent}\r\nReferer: {referer}\r\n"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-headers", headers,
+            "-protocol_whitelist", "http,https,tcp,tls,crypto,data",
+            "-i", manifest_url, "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c", "copy", "-movflags", "+faststart",
+            "-fs", str(1024 * 1024 * 1024), str(target),
+        ],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        timeout=MAX_DOWNLOAD_SECONDS,
+    )
+    if not target.exists() or target.stat().st_size == 0:
+        raise RuntimeError("FFmpeg មិនបានបង្កើតឯកសារវីដេអូទេ។")
+    return _compress_for_telegram(target, folder)
+
+
 def resolve_browser_media(page_url: str, folder: str) -> Path:
-    """IDM-style fallback: inspect public browser network responses for direct MP4 media."""
+    """IDM-style fallback: inspect public browser responses for MP4 and HLS/DASH manifests."""
     captured = []
+    captured_manifests = []
     with sync_playwright() as p:
         launch_args = [
             "--no-sandbox",
@@ -100,6 +199,7 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
         context = browser.new_context(
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
             accept_downloads=False,
+            service_workers="block",
         )
 
         # Block non-public destinations to reduce the risk of browser-based SSRF.
@@ -126,8 +226,15 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
                     "video/mp4" in content_type
                     or parsed.path.lower().endswith(".mp4")
                 )
+                is_manifest = (
+                    "mpegurl" in content_type
+                    or "dash+xml" in content_type
+                    or parsed.path.lower().endswith((".m3u8", ".mpd"))
+                )
                 if is_mp4:
                     captured.append(response_url)
+                elif is_manifest:
+                    captured_manifests.append(response_url)
             except Exception:
                 pass
 
@@ -155,10 +262,14 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
             context.close()
             browser.close()
 
+    # Prefer a direct MP4; otherwise try a public HLS/DASH manifest.
+    if not captured and captured_manifests:
+        manifest_url = captured_manifests[-1]
+        return download_public_manifest(manifest_url, page_url, folder)
     if not captured:
         raise RuntimeError(
-            "IDM Auto Mode រកមិនឃើញ Direct MP4 ក្នុង Network ទេ។ "
-            "Website អាចប្រើ Login, DRM, HLS/DASH ឬមិនបង្ហាញវីដេអូដោយស្វ័យប្រវត្តិ។"
+            "Browser Network Monitor មិនបានរកឃើញ MP4, HLS ឬ DASH Manifest ទេ។ "
+            "សូមពិនិត្យថា Page បានចាក់វីដេអូរួច និងអាចមើលបានជាសាធារណៈ។"
         )
 
     media_url = captured[-1]
@@ -192,24 +303,7 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
                 raise RuntimeError("វីដេអូធំជាង 1 GB; បញ្ឈប់ដើម្បីការពារទំហំ Disk។")
             output.write(chunk)
 
-    if total <= MAX_FILE_BYTES:
-        return target
-
-    compressed = Path(folder) / "browser-detected-compressed.mp4"
-    for crf in ("27", "31", "34"):
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(target), "-vf", "scale='min(1280,iw)':-2",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
-                "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
-                str(compressed),
-            ],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=MAX_DOWNLOAD_SECONDS,
-        )
-        if compressed.exists() and compressed.stat().st_size <= MAX_FILE_BYTES:
-            return compressed
-    raise RuntimeError("វីដេអូធំពេក ហើយមិនអាចបង្ហាប់ឱ្យតូចជាង 48 MB បានទេ។")
+    return _compress_for_telegram(target, folder)
 
 
 
