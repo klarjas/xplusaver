@@ -2,20 +2,28 @@
 
 A Telegram bot that accepts a public video URL and sends the downloaded video back to the same chat.
 
+## Features
+
+- Detects supported public video pages and direct media URLs using yt-dlp.
+- Supports MP4 and some HLS/M3U8 streams when the source permits public downloading.
+- Uses FFmpeg to merge compatible video/audio streams into MP4.
+- Deletes temporary downloads after sending.
+- Limits downloads to 48 MB and 15 minutes.
+
 ## Important limits
 
 - Only use this bot for videos you own or are authorized to download and share.
 - It does not bypass DRM, paywalls, login requirements, private links, or other access controls.
-- It uses yt-dlp, so only websites/formats supported by the installed yt-dlp version may work. No tool can guarantee support for every website.
-- Maximum output size is 48 MB to stay below the standard Telegram Bot API upload limit.
-- Downloads run in temporary storage and are deleted after processing.
+- Support depends on the website and its current player/stream implementation. IDM working in a logged-in browser does not guarantee that a server-side bot can access the same stream.
+- No browser cookies, login credentials, or private session tokens are collected.
+- Telegram Bot API upload limits apply; this project caps output at 48 MB.
 - Do not send private or intimate content shared without the subject's consent.
 
 ## Run locally
 
-1. Install Python 3.11 or newer.
+1. Install Python 3.11 or newer and FFmpeg.
 2. Install dependencies: `pip install -r requirements.txt`
-3. Set the environment variable `BOT_TOKEN` to your Telegram bot token.
+3. Set environment variable `BOT_TOKEN` to your Telegram bot token.
 4. Run: `python main.py`
 
 ## Deploy on Render
@@ -25,14 +33,15 @@ Create a **Background Worker** connected to this GitHub repository.
 - Runtime: Python
 - Build command: `pip install -r requirements.txt`
 - Start command: `python main.py`
-- Add Environment Variable:
+- Environment Variable:
   - Key: `BOT_TOKEN`
   - Value: your token from BotFather
 
-Do not put the bot token in GitHub or commit a `.env` file. After saving the environment variable, deploy the worker and check its logs for `Bot is starting in polling mode.`
+The `apt.txt` file requests FFmpeg for stream merging. Do not put the bot token in GitHub or commit a `.env` file. After saving the environment variable, deploy the worker and check logs for `Bot is starting in polling mode.`
 
 ## Troubleshooting
 
-- If a website is unsupported, update yt-dlp by redeploying after updating its dependency version.
-- If the video is over 48 MB, the bot will reject it rather than attempting an upload that is likely to fail.
-- Render's temporary filesystem is used only during a download; the bot does not keep a permanent video library.
+- Unsupported page: the website may not be supported by yt-dlp or may require a browser-only session.
+- HLS/M3U8: only publicly accessible streams can be processed; some streams require authorization or DRM and will not work.
+- File too large: videos over 48 MB are rejected to avoid failed Telegram uploads.
+- Render temporary storage is used only during processing; no permanent video library is kept.
