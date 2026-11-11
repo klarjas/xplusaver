@@ -6,6 +6,8 @@ import re
 import shutil
 import socket
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -186,9 +188,43 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("Unhandled Telegram update error", exc_info=context.error)
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    """Tiny HTTP health endpoint so this polling bot can run on Render Web Service."""
+
+    def do_GET(self) -> None:
+        if self.path not in {"/", "/health", "/healthz"}:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+            return
+
+        body = b"OK - Telegram video downloader is running"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        # Keep routine health checks out of the application logs.
+        return
+
+
+def start_health_server() -> None:
+    port = int(os.getenv("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, name="render-health", daemon=True)
+    thread.start()
+    logger.info("Health server listening on 0.0.0.0:%s", port)
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Add it in Render Environment Variables.")
+
+    # Render currently hosts this as a Web Service, so expose a health port
+    # while the Telegram bot continues to receive updates through polling.
+    start_health_server()
 
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
