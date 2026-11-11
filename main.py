@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -250,7 +251,7 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
                 }
             }""")
             for selector in [
-                "video", "button[aria-label*='play' i]",
+                "button[aria-label*='play' i]",
                 ".vjs-big-play-button", ".plyr__control--overlaid"
             ]:
                 try:
@@ -261,6 +262,8 @@ def resolve_browser_media(page_url: str, folder: str) -> Path:
         finally:
             context.close()
             browser.close()
+
+    logger.info("Browser media scan finished: mp4=%d manifests=%d", len(captured), len(captured_manifests))
 
     # Prefer a direct MP4; otherwise try a public HLS/DASH manifest.
     if not captured and captured_manifests:
