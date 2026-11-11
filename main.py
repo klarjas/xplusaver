@@ -1,0 +1,182 @@
+import asyncio
+import ipaddress
+import logging
+import os
+import re
+import shutil
+import socket
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
+
+import yt_dlp
+from telegram import Update
+from telegram.constants import ChatAction
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+MAX_FILE_BYTES = 48 * 1024 * 1024  # Keep below Telegram Bot API's standard upload limit.
+MAX_DOWNLOAD_SECONDS = 15 * 60
+MAX_CONCURRENT_DOWNLOADS = 2
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+)
+logger = logging.getLogger("public-video-downloader")
+
+URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
+
+
+def is_public_http_url(raw_url: str) -> bool:
+    """Reject non-HTTP URLs, credentials, localhost, and private/reserved IP targets."""
+    try:
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        if parsed.username or parsed.password:
+            return False
+
+        host = parsed.hostname.rstrip(".").lower()
+        if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+            return False
+
+        try:
+            ip = ipaddress.ip_address(host)
+            return ip.is_global
+        except ValueError:
+            addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+            return bool(addresses) and all(ipaddress.ip_address(item[4][0]).is_global for item in addresses)
+    except (ValueError, OSError):
+        return False
+
+
+def download_video(url: str, folder: str) -> Path:
+    output_template = str(Path(folder) / "%(title).100s-%(id)s.%(ext)s")
+    options = {
+        "outtmpl": output_template,
+        "format": "best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "max_filesize": MAX_FILE_BYTES,
+        "socket_timeout": 20,
+        "retries": 2,
+        "fragment_retries": 2,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+        "overwrites": True,
+        "cachedir": False,
+        # No cookies, credentials, browser profiles, or access-control bypass.
+    }
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        ydl.extract_info(url, download=True)
+
+    candidates = [
+        path for path in Path(folder).iterdir()
+        if path.is_file() and path.suffix.lower() in {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
+    ]
+    if not candidates:
+        raise RuntimeError("No downloadable video file was produced.")
+    result = max(candidates, key=lambda item: item.stat().st_mtime)
+    if result.stat().st_size > MAX_FILE_BYTES:
+        raise RuntimeError("The video is larger than the bot's 48 MB upload limit.")
+    return result
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "សួស្តី! ផ្ញើ URL វីដេអូសាធារណៈ ឬវីដេអូដែលអ្នកមានសិទ្ធិទាញយក។\n\n"
+        "ខ្ញុំនឹងព្យាយាមទាញយក ហើយផ្ញើ MP4 ត្រឡប់មកវិញ។\n"
+        "សូមប្រើតែខ្លឹមសារដែលអ្នកមានសិទ្ធិប្រើប្រាស់។\n"
+        "កំណត់ទំហំឯកសារ៖ 48 MB។\n"
+        "មិនគាំទ្រការរំលង DRM, paywall, login ឬការការពារចូលប្រើទេ។"
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "របៀបប្រើ៖ ផ្ញើ URL វីដេអូមួយក្នុងសារ។\n"
+        "Bot គាំទ្រតែ website ដែល yt-dlp អាចទាញយកបាន និង URL ឯកសារវីដេអូផ្ទាល់។ "
+        "មិនអាចធានាថាគ្រប់ website ទាំងអស់ដំណើរការទេ។"
+    )
+
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not message.text:
+        return
+
+    matches = URL_RE.findall(message.text)
+    if not matches:
+        await message.reply_text("សូមផ្ញើ URL ដែលចាប់ផ្តើមដោយ http:// ឬ https://")
+        return
+
+    url = matches[0].rstrip(".,);]")
+    if not is_public_http_url(url):
+        await message.reply_text("URL មិនត្រឹមត្រូវ ឬមិនអនុញ្ញាតសម្រាប់សុវត្ថិភាពទេ។")
+        return
+
+    async with DOWNLOAD_SEMAPHORE:
+        status = await message.reply_text("⏳ កំពុងពិនិត្យ និងទាញយកវីដេអូ…")
+        workdir = tempfile.mkdtemp(prefix="video-bot-")
+        try:
+            await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
+            try:
+                video_path = await asyncio.wait_for(
+                    asyncio.to_thread(download_video, url, workdir),
+                    timeout=MAX_DOWNLOAD_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError("ការទាញយកចំណាយពេលលើស 15 នាទី។ សូមសាកល្បងម្ដងទៀត។")
+
+            await status.edit_text("✅ ទាញយករួចរាល់។ កំពុងផ្ញើវីដេអូ…")
+            with video_path.open("rb") as video_file:
+                await context.bot.send_video(
+                    chat_id=message.chat_id,
+                    video=video_file,
+                    caption=f"🎬 {video_path.stem[:900]}",
+                    supports_streaming=True,
+                    read_timeout=180,
+                    write_timeout=180,
+                    connect_timeout=30,
+                )
+            await status.delete()
+        except yt_dlp.utils.DownloadError as exc:
+            logger.info("Download rejected/failed: %s", exc)
+            await status.edit_text(
+                "មិនអាចទាញយកវីដេអូនេះបានទេ។ វេបសាយអាចមិនគាំទ្រ តំណអាចផុតកំណត់ "
+                "ឬត្រូវការ login/ការអនុញ្ញាត។"
+            )
+        except Exception as exc:
+            logger.exception("Video processing failed")
+            safe_message = str(exc)
+            if len(safe_message) > 250:
+                safe_message = safe_message[:250] + "…"
+            await status.edit_text(f"មិនអាចដំណើរការបានទេ៖ {safe_message}")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled Telegram update error", exc_info=context.error)
+
+
+def main() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing. Add it in Render Environment Variables.")
+
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    application.add_error_handler(error_handler)
+
+    logger.info("Bot is starting in polling mode.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
