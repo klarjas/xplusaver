@@ -1,47 +1,73 @@
-# Telegram Public Video Downloader
+# XPlusAver — Telegram Video Downloader
 
-A Telegram bot that accepts a public video URL and sends the downloaded video back to the same chat.
+Telegram bot that accepts a video URL and sends back a downloadable video when the source makes the media publicly accessible and the user is authorized to download/share it.
 
 ## Features
 
-- Detects supported public video pages and direct media URLs using yt-dlp.
-- Supports MP4 and some HLS/M3U8 streams when the source permits public downloading.
-- Uses FFmpeg to merge compatible video/audio streams into MP4.
-- Deletes temporary downloads after sending.
-- Limits downloads to 48 MB and 15 minutes.
+- Telegram `/start` and `/help` commands.
+- Direct MP4/media URL detection.
+- yt-dlp extraction for supported public video pages.
+- Playwright Chromium network-media detection as a fallback.
+- FFmpeg processing for supported, unencrypted HLS/DASH streams and file compression.
+- Temporary download cleanup after each request.
+- SSRF-oriented checks that reject localhost and private/reserved IP destinations.
+- 48 MB output target for Telegram Bot API compatibility; 1 GB temporary input ceiling.
+- 15-minute download timeout and bounded concurrent downloads.
+- Render `/health` endpoint.
 
-## Important limits
+## Important limitations
 
-- Only use this bot for videos you own or are authorized to download and share.
-- It does not bypass DRM, paywalls, login requirements, private links, or other access controls.
-- Support depends on the website and its current player/stream implementation. IDM working in a logged-in browser does not guarantee that a server-side bot can access the same stream.
-- No browser cookies, login credentials, or private session tokens are collected.
-- Telegram Bot API upload limits apply; this project caps output at 48 MB.
-- Do not send private or intimate content shared without the subject's consent.
+- Use only videos you own or are authorized to download and share.
+- The bot does not bypass DRM, encryption keys, paywalls, login walls, CAPTCHA, private sessions, or other access controls.
+- It does not collect browser cookies, passwords, or private session tokens.
+- Some websites may block server-side access or require a supported extractor; a link that plays in a personal browser may still fail on a server.
+- Direct links can expire or require a valid Referer/session. HTTP 403 means the source refused the request; it is not proof that every other authorized access method will fail.
+- Telegram upload limits and source-site terms apply.
 
-## Run locally
+## Run locally (Windows / Linux)
 
-1. Install Python 3.11 or newer and FFmpeg.
-2. Install dependencies: `pip install -r requirements.txt`
-3. Set environment variable `BOT_TOKEN` to your Telegram bot token.
-4. Run: `python main.py`
+1. Install Python 3.12 and FFmpeg.
+2. Create a Telegram bot with BotFather and copy its token.
+3. Install dependencies:
 
-## Deploy on Render
+   ```bash
+   pip install -r requirements.txt
+   python -m playwright install chromium
+   ```
 
-Create a **Background Worker** connected to this GitHub repository.
+4. Set `BOT_TOKEN` as an environment variable (do not put the real token in GitHub).
+5. Run:
 
-- Runtime: Python
-- Build command: `pip install -r requirements.txt`
-- Start command: `python main.py`
-- Environment Variable:
-  - Key: `BOT_TOKEN`
-  - Value: your token from BotFather
+   ```bash
+   python main.py
+   ```
 
-The `apt.txt` file requests FFmpeg for stream merging. Do not put the bot token in GitHub or commit a `.env` file. After saving the environment variable, deploy the worker and check logs for `Bot is starting in polling mode.`
+## Deploy to Render
 
-## Troubleshooting
+1. Connect this GitHub repository to Render as a **Web Service**.
+2. Render can use the included `render.yaml` Blueprint settings.
+3. Add `BOT_TOKEN` under Render → Environment. Keep it secret; never commit it.
+4. Build command:
 
-- Unsupported page: the website may not be supported by yt-dlp or may require a browser-only session.
-- HLS/M3U8: only publicly accessible streams can be processed; some streams require authorization or DRM and will not work.
-- File too large: videos over 48 MB are rejected to avoid failed Telegram uploads.
-- Render temporary storage is used only during processing; no permanent video library is kept.
+   ```bash
+   pip install --upgrade pip && pip install -r requirements.txt && python -m playwright install chromium
+   ```
+
+5. Start command: `python main.py`.
+6. Confirm the service health endpoint responds at `/health`.
+
+The service uses Telegram long polling and a small HTTP health endpoint. Do not run a second copy of the same bot token at the same time, because Telegram polling conflicts when multiple instances consume the same updates.
+
+## Configuration
+
+| Variable | Required | Description |
+|---|---:|---|
+| `BOT_TOKEN` | Yes | Telegram BotFather token |
+| `PORT` | No | HTTP health port; defaults to `10000` |
+| `LOG_LEVEL` | No | Logging level; defaults to `INFO` |
+
+## Repository safety
+
+- `.env` and local secrets are ignored by `.gitignore`.
+- Do not upload bot tokens, cookies, passwords, or private video links to this repository.
+- Temporary media is deleted after the bot finishes processing.
