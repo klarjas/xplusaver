@@ -15,7 +15,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-MAX_FILE_BYTES = 48 * 1024 * 1024  # Keep below Telegram Bot API's standard upload limit.
+MAX_FILE_BYTES = 48 * 1024 * 1024
 MAX_DOWNLOAD_SECONDS = 15 * 60
 MAX_CONCURRENT_DOWNLOADS = 2
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -25,7 +25,6 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
 )
 logger = logging.getLogger("public-video-downloader")
-
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 
 
@@ -46,8 +45,12 @@ def is_public_http_url(raw_url: str) -> bool:
             ip = ipaddress.ip_address(host)
             return ip.is_global
         except ValueError:
-            addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
-            return bool(addresses) and all(ipaddress.ip_address(item[4][0]).is_global for item in addresses)
+            addresses = socket.getaddrinfo(
+                host, parsed.port or (443 if parsed.scheme == "https" else 80)
+            )
+            return bool(addresses) and all(
+                ipaddress.ip_address(item[4][0]).is_global for item in addresses
+            )
     except (ValueError, OSError):
         return False
 
@@ -55,20 +58,25 @@ def is_public_http_url(raw_url: str) -> bool:
 def download_video(url: str, folder: str) -> Path:
     output_template = str(Path(folder) / "%(title).100s-%(id)s.%(ext)s")
     options = {
-        "outtmpl": output_template,
-        "format": "best[ext=mp4]/best",
+        # Try a ready-made MP4 first; otherwise combine compatible MP4 video
+        # and M4A audio streams. FFmpeg is installed by Render via apt.txt.
+        "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
         "merge_output_format": "mp4",
+        "outtmpl": output_template,
         "noplaylist": True,
         "max_filesize": MAX_FILE_BYTES,
-        "socket_timeout": 20,
-        "retries": 2,
-        "fragment_retries": 2,
+        "socket_timeout": 25,
+        "retries": 3,
+        "fragment_retries": 3,
+        "file_access_retries": 2,
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
         "overwrites": True,
         "cachedir": False,
-        # No cookies, credentials, browser profiles, or access-control bypass.
+        "hls_prefer_native": True,
+        "format_sort": ["res:720", "ext:mp4:m4a"],
+        # Intentionally no cookies, browser profiles, credentials, or access-control bypass.
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
@@ -79,28 +87,31 @@ def download_video(url: str, folder: str) -> Path:
         if path.is_file() and path.suffix.lower() in {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
     ]
     if not candidates:
-        raise RuntimeError("No downloadable video file was produced.")
+        raise RuntimeError(
+            "មិនរកឃើញឯកសារវីដេអូទេ។ Website នេះអាចមិនមាន Extractor ដែលគាំទ្រ "
+            "ឬប្រើ Stream ដែលមិនអាចចូលប្រើដោយសាធារណៈ។"
+        )
+
     result = max(candidates, key=lambda item: item.stat().st_mtime)
     if result.stat().st_size > MAX_FILE_BYTES:
-        raise RuntimeError("The video is larger than the bot's 48 MB upload limit.")
+        raise RuntimeError("វីដេអូធំជាង 48 MB ដែល Bot អាចផ្ញើបាន។")
     return result
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "សួស្តី! ផ្ញើ URL វីដេអូសាធារណៈ ឬវីដេអូដែលអ្នកមានសិទ្ធិទាញយក។\n\n"
-        "ខ្ញុំនឹងព្យាយាមទាញយក ហើយផ្ញើ MP4 ត្រឡប់មកវិញ។\n"
-        "សូមប្រើតែខ្លឹមសារដែលអ្នកមានសិទ្ធិប្រើប្រាស់។\n"
-        "កំណត់ទំហំឯកសារ៖ 48 MB។\n"
-        "មិនគាំទ្រការរំលង DRM, paywall, login ឬការការពារចូលប្រើទេ។"
+    await update.effective_message.reply_text(
+        "សួស្តី! ផ្ញើ Link វីដេអូសាធារណៈ ឬវីដេអូដែលអ្នកមានសិទ្ធិទាញយក។\n\n"
+        "Bot នឹងពិនិត្យ Link ហើយព្យាយាមផ្ញើវីដេអូត្រឡប់មកវិញ។\n"
+        "គាំទ្រ Website/MP4/HLS ដែលអាចទាញយកដោយសាធារណៈ និងមានទំហំអតិបរមា 48 MB។\n"
+        "មិនរំលង DRM, paywall, login ឬការការពារសិទ្ធិចូលប្រើទេ។"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "របៀបប្រើ៖ ផ្ញើ URL វីដេអូមួយក្នុងសារ។\n"
-        "Bot គាំទ្រតែ website ដែល yt-dlp អាចទាញយកបាន និង URL ឯកសារវីដេអូផ្ទាល់។ "
-        "មិនអាចធានាថាគ្រប់ website ទាំងអស់ដំណើរការទេ។"
+        "Bot ប្រើ yt-dlp និង FFmpeg ដើម្បីគាំទ្រ MP4 និង Stream មួយចំនួនដូចជា HLS/M3U8។\n"
+        "ការគាំទ្រអាស្រ័យលើ Website; មិនអាចធានាថាគ្រប់ Link ដំណើរការទេ។"
     )
 
 
@@ -120,10 +131,12 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     async with DOWNLOAD_SEMAPHORE:
-        status = await message.reply_text("⏳ កំពុងពិនិត្យ និងទាញយកវីដេអូ…")
+        status = await message.reply_text("⏳ កំពុងពិនិត្យ Link និងប្រភេទវីដេអូ…")
         workdir = tempfile.mkdtemp(prefix="video-bot-")
         try:
-            await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
+            await context.bot.send_chat_action(
+                chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO
+            )
             try:
                 video_path = await asyncio.wait_for(
                     asyncio.to_thread(download_video, url, workdir),
@@ -145,10 +158,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 )
             await status.delete()
         except yt_dlp.utils.DownloadError as exc:
-            logger.info("Download rejected/failed: %s", exc)
+            logger.info("Download failed: %s", exc)
             await status.edit_text(
-                "មិនអាចទាញយកវីដេអូនេះបានទេ។ វេបសាយអាចមិនគាំទ្រ តំណអាចផុតកំណត់ "
-                "ឬត្រូវការ login/ការអនុញ្ញាត។"
+                "មិនអាចទាញយក Link នេះបានទេ។ Website អាចមិនគាំទ្រ, Link អាចផុតកំណត់ "
+                "ឬវីដេអូមិនអាចចូលប្រើជាសាធារណៈ។ Bot មិនប្រើ Cookies/Login ដើម្បីរំលងការការពារទេ។"
             )
         except Exception as exc:
             logger.exception("Video processing failed")
