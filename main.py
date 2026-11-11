@@ -4,12 +4,17 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import socket
 import tempfile
 import threading
+import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+from playwright.sync_api import sync_playwright
 
 import yt_dlp
 from telegram import Update
@@ -57,7 +62,111 @@ def is_public_http_url(raw_url: str) -> bool:
         return False
 
 
+
+def resolve_filecoster_video(page_url: str, folder: str) -> Path:
+    """Open a public FileCoster page and capture its public MP4 response."""
+    captured = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            accept_downloads=False,
+        )
+        page = context.new_page()
+
+        def on_response(response):
+            try:
+                response_url = response.url
+                parsed = urlparse(response_url)
+                headers = response.headers
+                content_type = headers.get("content-type", "").lower()
+                if (
+                    parsed.scheme in {"http", "https"}
+                    and parsed.hostname
+                    and (parsed.hostname == "overfetch.video" or parsed.hostname.endswith(".overfetch.video"))
+                    and ("video/mp4" in content_type or response_url.lower().split("?")[0].endswith(".mp4"))
+                ):
+                    captured.append(response_url)
+            except Exception:
+                pass
+
+        page.on("response", on_response)
+        try:
+            page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(2500)
+            # Try native video playback and visible play controls; no login or
+            # access-control bypass is attempted.
+            page.evaluate("""() => {
+                const v = document.querySelector('video');
+                if (v) { v.muted = true; const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+            }""")
+            for selector in ["video", "button[aria-label*='play' i]", ".vjs-big-play-button", ".plyr__control--overlaid"]:
+                try:
+                    page.locator(selector).first.click(timeout=1500)
+                except Exception:
+                    pass
+            page.wait_for_timeout(9000)
+        finally:
+            context.close()
+            browser.close()
+
+    if not captured:
+        raise RuntimeError(
+            "FileCoster មិនបានបង្ហាញ Direct MP4 ទៅកាន់ Browser ទេ។ "
+            "វាអាចត្រូវការ Login ឬប្រើប្រព័ន្ធ Stream ដែលមិនគាំទ្រ។"
+        )
+
+    media_url = captured[-1]
+    target = Path(folder) / "filecoster-video.mp4"
+    request = urllib.request.Request(
+        media_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Referer": "https://filecoster.com/",
+            "Accept": "*/*",
+        },
+    )
+    total = 0
+    with urllib.request.urlopen(request, timeout=45) as response, target.open("wb") as output:
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "video/mp4" not in content_type and not response.geturl().lower().split("?")[0].endswith(".mp4"):
+            raise RuntimeError("ប្រភពដែលរកឃើញមិនមែនជា MP4 ទេ។")
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 1024 * 1024 * 1024:
+                raise RuntimeError("វីដេអូធំជាង 1 GB; បញ្ឈប់ដើម្បីការពារទំហំ Disk។")
+            output.write(chunk)
+
+    if total <= MAX_FILE_BYTES:
+        return target
+
+    # Telegram Bot API upload limit: compress oversized public MP4 to <=48 MiB.
+    compressed = Path(folder) / "filecoster-compressed.mp4"
+    for crf in ("27", "31", "34"):
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(target), "-vf", "scale='min(1280,iw)':-2",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
+                "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+                str(compressed),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=MAX_DOWNLOAD_SECONDS,
+        )
+        if compressed.exists() and compressed.stat().st_size <= MAX_FILE_BYTES:
+            return compressed
+    raise RuntimeError("វីដេអូធំពេក ហើយមិនអាចបង្ហាប់ឱ្យតូចជាង 48 MB បានទេ។")
+
+
+
 def download_video(url: str, folder: str) -> Path:
+    host = (urlparse(url).hostname or "").lower()
+    if host == "filecoster.com" or host.endswith(".filecoster.com"):
+        return resolve_filecoster_video(url, folder)
+
     base_options = {
         # Try a ready-made MP4 first; otherwise combine compatible MP4 video
         # and M4A audio streams. FFmpeg is installed by Render via apt.txt.
