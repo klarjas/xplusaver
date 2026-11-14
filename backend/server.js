@@ -197,16 +197,46 @@ app.get('/api/vendor/products', authenticate, async (req, res) => {
   if (error) return fail(res, 500, 'Could not load vendor products');
   res.json({ data: (data || []).map(publicProduct), vendor });
 });
-app.post('/api/products', authenticate, requireVendor, async (req, res) => {
+app.post('/api/products', authenticate, async (req, res) => {
   const title = clean(req.body.title, 160);
   const description = clean(req.body.description, 5000);
   const category = clean(req.body.category || 'General', 80);
   const price = Number(req.body.price);
   const stock = Number(req.body.stock);
   if (title.length < 2 || !Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) return fail(res, 400, 'Invalid title, price or stock');
-  const status = process.env.AUTO_APPROVE_PRODUCTS === 'true' ? 'active' : 'pending';
+
+  const admin = await isAdmin(req.user.id);
+  let vendor = null;
+  if (admin) {
+    const { data: existingVendor, error: vendorLookupError } = await vendorFor(req.user.id);
+    if (vendorLookupError) return fail(res, 500, 'Could not load admin store');
+    if (existingVendor) {
+      vendor = existingVendor;
+      if (vendor.status !== 'approved') {
+        const { data: approvedVendor, error } = await supabase.from('vendors')
+          .update({ status: 'approved' }).eq('id', vendor.id).select().single();
+        if (error) return fail(res, 400, 'Could not enable admin store');
+        vendor = approvedVendor;
+      }
+    } else {
+      const { data: createdVendor, error } = await supabase.from('vendors').insert({
+        user_id: req.user.id,
+        store_name: 'EcomStore Admin',
+        description: 'Official products managed by the marketplace administrator.',
+        status: 'approved'
+      }).select().single();
+      if (error) return fail(res, 400, 'Could not create admin store');
+      vendor = createdVendor;
+    }
+  } else {
+    const { data: seller, error } = await vendorFor(req.user.id);
+    if (error || !seller || seller.status !== 'approved') return fail(res, 403, 'Approved vendor account required');
+    vendor = seller;
+  }
+
+  const status = admin || process.env.AUTO_APPROVE_PRODUCTS === 'true' ? 'active' : 'pending';
   const { data, error } = await supabase.from('products')
-    .insert({ vendor_id: req.vendor.id, title, description, category, price, stock, status }).select().single();
+    .insert({ vendor_id: vendor.id, title, description, category, price, stock, status }).select().single();
   if (error) return fail(res, 400, 'Could not create product');
   res.status(201).json({ data });
 });
@@ -246,8 +276,16 @@ app.delete('/api/products/:id', authenticate, async (req, res) => {
   for (const img of product.product_images || []) await deleteTelegramMessage(img.telegram_message_id);
   res.json({ success: true, archived: false });
 });
-app.post('/api/products/:id/images', authenticate, requireVendor, upload.array('images', 5), async (req, res) => {
-  const { data: product } = await supabase.from('products').select('id').eq('id', req.params.id).eq('vendor_id', req.vendor.id).maybeSingle();
+app.post('/api/products/:id/images', authenticate, upload.array('images', 5), async (req, res) => {
+  const admin = await isAdmin(req.user.id);
+  const { data: vendor } = await vendorFor(req.user.id);
+  if (!admin && (!vendor || vendor.status !== 'approved')) return fail(res, 403, 'Approved vendor account required');
+  let productQuery = supabase.from('products').select('id').eq('id', req.params.id);
+  if (admin) {
+    if (vendor) productQuery = productQuery.eq('vendor_id', vendor.id);
+    else return fail(res, 404, 'Admin store not found');
+  } else productQuery = productQuery.eq('vendor_id', vendor.id);
+  const { data: product } = await productQuery.maybeSingle();
   if (!product) return fail(res, 404, 'Product not found');
   const files = req.files || [];
   if (!files.length || files.some(file => !file.mimetype.startsWith('image/'))) return fail(res, 400, 'Choose image files');
@@ -265,8 +303,16 @@ app.post('/api/products/:id/images', authenticate, requireVendor, upload.array('
     return fail(res, 502, error.message || 'Image upload failed');
   }
 });
-app.delete('/api/products/:id/images/:imageId', authenticate, requireVendor, async (req, res) => {
-  const { data: product } = await supabase.from('products').select('id').eq('id', req.params.id).eq('vendor_id', req.vendor.id).maybeSingle();
+app.delete('/api/products/:id/images/:imageId', authenticate, async (req, res) => {
+  const admin = await isAdmin(req.user.id);
+  const { data: vendor } = await vendorFor(req.user.id);
+  if (!admin && (!vendor || vendor.status !== 'approved')) return fail(res, 403, 'Approved vendor account required');
+  let productQuery = supabase.from('products').select('id').eq('id', req.params.id);
+  if (admin) {
+    if (vendor) productQuery = productQuery.eq('vendor_id', vendor.id);
+    else return fail(res, 404, 'Admin store not found');
+  } else productQuery = productQuery.eq('vendor_id', vendor.id);
+  const { data: product } = await productQuery.maybeSingle();
   if (!product) return fail(res, 404, 'Product not found');
   const { data: row } = await supabase.from('product_images').select('*').eq('id', req.params.imageId).eq('product_id', product.id).maybeSingle();
   if (!row) return fail(res, 404, 'Image not found');
