@@ -235,10 +235,16 @@ app.delete('/api/products/:id', authenticate, async (req, res) => {
   const { data: product } = await supabase.from('products').select('id,vendor_id,product_images(id,telegram_message_id)').eq('id', req.params.id).maybeSingle();
   if (!product) return fail(res, 404, 'Product not found');
   if (!admin && (!vendor || product.vendor_id !== vendor.id)) return fail(res, 403, 'Not allowed');
+  const { count: soldCount } = await supabase.from('order_items').select('id', { count: 'exact', head: true }).eq('product_id', product.id);
+  if ((soldCount || 0) > 0) {
+    const { error } = await supabase.from('products').update({ status: 'archived', updated_at: new Date().toISOString() }).eq('id', product.id);
+    if (error) return fail(res, 500, 'Could not archive product with order history');
+    return res.json({ success: true, archived: true });
+  }
   const { error } = await supabase.from('products').delete().eq('id', product.id);
   if (error) return fail(res, 500, 'Could not delete product');
   for (const img of product.product_images || []) await deleteTelegramMessage(img.telegram_message_id);
-  res.json({ success: true });
+  res.json({ success: true, archived: false });
 });
 app.post('/api/products/:id/images', authenticate, requireVendor, upload.array('images', 5), async (req, res) => {
   const { data: product } = await supabase.from('products').select('id').eq('id', req.params.id).eq('vendor_id', req.vendor.id).maybeSingle();
