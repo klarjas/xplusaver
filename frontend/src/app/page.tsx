@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Search, ShoppingBag, Store, ShieldCheck, ArrowRight, UserRound, X, Plus, Minus, Trash2, LogOut, Package } from 'lucide-react';
 import { getSupabaseBrowserClient } from '../lib/supabase';
 
@@ -64,7 +64,7 @@ export default function Home() {
     setCart(current => current.map(item => item.product.id === id ? { ...item, quantity: item.quantity + amount } : item).filter(item => item.quantity > 0));
   }
 
-  async function submitAuth(event: React.FormEvent<HTMLFormElement>) {
+  async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setAuthBusy(true); setAuthMessage('');
     try {
       const supabase = getSupabaseBrowserClient();
