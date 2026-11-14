@@ -24,7 +24,10 @@ export default function DashboardPage() {
   const [productForm, setProductForm] = useState({ title:'', description:'', category:'General', price:'', stock:'1' });
 
   const api = useCallback(async (path: string, options: RequestInit = {}) => {
-    const response = await fetch(path, { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${token}`, ...(options.body instanceof FormData ? {} : { 'Content-Type':'application/json' }) } });
+    const headers = new Headers(options.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    if (!(options.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    const response = await fetch(path, { ...options, headers });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || 'Request failed');
     return result.data;
@@ -47,8 +50,8 @@ export default function DashboardPage() {
         else setData([]);
       } else if (me.vendor) {
         const [products, orders] = await Promise.all([api('/api/vendor/products'), api('/api/vendor/orders')]);
-        if (tab === 'products') setData(products.data || []);
-        else if (tab === 'orders') setData(orders.data || []);
+        if (tab === 'products') setData(products || []);
+        else if (tab === 'orders') setData(orders || []);
         else setData([]);
       } else if (tab === 'orders') {
         setData(await api('/api/orders'));
