@@ -312,7 +312,7 @@ app.get('/api/vendor/orders', authenticate, async (req, res) => {
   const { data: vendor } = await vendorFor(req.user.id);
   if (!vendor) return fail(res, 403, 'Vendor account not found');
   const { data: items, error } = await supabase.from('order_items')
-    .select('id,order_id,product_id,quantity,unit_price,products(title),orders(id,status,total,customer_name,customer_phone,delivery_address,delivery_note,payment_method,payment_status,created_at)')
+    .select('id,order_id,product_id,quantity,unit_price,fulfillment_status,products(title),orders(id,status,total,customer_name,customer_phone,delivery_address,delivery_note,payment_method,payment_status,created_at)')
     .eq('vendor_id', vendor.id).order('created_at', { ascending: false, referencedTable: 'orders' });
   if (error) return fail(res, 500, 'Could not load vendor orders');
   res.json({ data: items || [], vendor });
@@ -322,11 +322,18 @@ app.patch('/api/vendor/orders/:orderId', authenticate, async (req, res) => {
   if (!vendor || vendor.status !== 'approved') return fail(res, 403, 'Approved vendor required');
   const status = clean(req.body.status, 30);
   if (!['processing','shipped','completed','cancelled'].includes(status)) return fail(res, 400, 'Invalid order status');
-  const { data: items } = await supabase.from('order_items').select('id').eq('order_id', req.params.orderId).eq('vendor_id', vendor.id).limit(1);
+  const { data: items } = await supabase.from('order_items').select('id').eq('order_id', req.params.orderId).eq('vendor_id', vendor.id);
   if (!items?.length) return fail(res, 404, 'Order not found for this store');
-  const { data, error } = await supabase.from('orders').update({ status, updated_at: new Date().toISOString() }).eq('id', req.params.orderId).select().single();
-  if (error) return fail(res, 400, 'Could not update order');
-  res.json({ data });
+  const { error: itemError } = await supabase.from('order_items').update({ fulfillment_status: status }).eq('order_id', req.params.orderId).eq('vendor_id', vendor.id);
+  if (itemError) return fail(res, 400, 'Could not update fulfilment');
+  const { data: allItems } = await supabase.from('order_items').select('fulfillment_status').eq('order_id', req.params.orderId);
+  const states = (allItems || []).map(item => item.fulfillment_status);
+  const aggregate = states.length && states.every(value => value === 'completed') ? 'completed'
+    : states.some(value => value === 'shipped') ? 'shipped'
+    : states.some(value => value === 'processing') ? 'processing'
+    : states.length && states.every(value => value === 'cancelled') ? 'cancelled' : 'pending';
+  await supabase.from('orders').update({ status: aggregate, updated_at: new Date().toISOString() }).eq('id', req.params.orderId);
+  res.json({ success: true, fulfillment_status: status, order_status: aggregate });
 });
 
 // Admin operations.
