@@ -1,48 +1,86 @@
-# EcomStore — Full-Stack Multi-Vendor Marketplace
+# EcomStore
 
-A Cambodia + international multi-vendor marketplace.
+Full-stack marketplace for Cambodia and international customers. One Render Web Service runs the Next.js storefront and Express API; Supabase provides Auth/Postgres and a Telegram channel stores product images.
+
+## Features
+
+- Customer email registration, sign-in and sign-out with Supabase Auth.
+- Product catalogue, search, product details and responsive shopping cart.
+- Checkout with delivery contact/address, cash on delivery or bank-transfer record (manual verification).
+- Atomic server-side checkout: current prices and stock are checked in PostgreSQL; inventory is decremented in the same transaction as the order.
+- Customer order history.
+- Vendor application and approval workflow.
+- Vendor dashboard: create products, upload up to five images per product to Telegram, manage stock and view orders.
+- Admin dashboard: marketplace metrics, approve/reject/block vendors, approve/reject products and update order/payment statuses.
+- Telegram image proxy; Telegram bot token is never sent to the browser.
+- Role escalation protection: customer accounts cannot update their own profile role.
+- Products with order history are archived instead of physically deleted.
 
 ## Stack
-- Frontend: Next.js App Router, TypeScript, Tailwind CSS
-- Backend: Node.js 20+, Express 5
-- Database/Auth: Supabase PostgreSQL and Auth
-- Product image storage: Telegram Channel (backend-only bot token)
-- Hosting: One Render Web Service
 
-## Repository layout
-- `frontend/` — customer-facing Next.js application
-- `backend/` — Express API and Telegram image proxy
-- `supabase/schema.sql` — database schema and Row Level Security
+- Next.js 15 / React 19 / TypeScript / Tailwind CSS 4
+- Express 5 (ES modules)
+- Supabase Auth + PostgreSQL
+- Telegram Bot API for product image storage
 
 ## Supabase setup
-1. Create a Supabase project.
-2. Run `supabase/schema.sql` in Supabase SQL Editor.
-3. Add the Supabase URL and keys as Render environment variables. Never commit real keys to GitHub.
 
-## Render — ONE service
-Create one **Web Service** for this repository.
+1. Open the Supabase SQL Editor for the EcomStore project.
+2. Run the complete current `supabase/schema.sql` file from this repository. It is safe to re-run and includes the checkout function and security migration.
+3. Create a customer account through the storefront.
+4. To make your own account the first administrator, replace the email below with the exact email used for that account and run this SQL in the SQL Editor:
 
-- Root Directory: leave blank (repository root)
-- Build Command: `npm install && npm run build`
+```sql
+update public.profiles
+set role = 'admin'
+where id = (
+  select id from auth.users
+  where email = 'YOUR_ADMIN_EMAIL'
+);
+```
+
+The profile row is created automatically the first time the signed-in account calls the API (for example, by opening `/dashboard`). Do not set the role using the public browser client.
+
+## Render: one Web Service
+
+- Root Directory: leave blank.
+- Build Command: `yarn install && yarn build`
 - Start Command: `npm start`
-- Runtime: Node 20 or newer
+- Health Check Path: `/health` (if you use a health-check field).
 
-### Environment variables
-- `NODE_ENV` = `production`
-- `SUPABASE_URL` = Supabase Project URL
-- `SUPABASE_SERVICE_ROLE_KEY` = Supabase Secret key (backend only)
-- `NEXT_PUBLIC_SUPABASE_URL` = Supabase Project URL
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY` = Supabase Publishable/anon key
-- `TELEGRAM_BOT_TOKEN` = Telegram bot token (backend only)
-- `TELEGRAM_CHANNEL_ID` = Telegram image storage channel ID
-- `AUTO_APPROVE_PRODUCTS` = `false`
+Set these environment variables in Render. Never commit real secrets to GitHub.
 
-Render supplies `PORT` automatically. The frontend calls the API using same-origin `/api` paths, so no separate frontend URL or CORS origin is required.
+| Variable | Where it is used |
+|---|---|
+| `NODE_ENV` | `production` |
+| `SUPABASE_URL` | Backend Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Backend only; keep secret |
+| `NEXT_PUBLIC_SUPABASE_URL` | Browser Supabase URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser publishable/anon key |
+| `TELEGRAM_BOT_TOKEN` | Backend only; keep secret |
+| `TELEGRAM_CHANNEL_ID` | Private image-storage channel ID |
+| `AUTO_APPROVE_PRODUCTS` | Keep `false` so admins review new products |
 
-**Security:** Never put `SUPABASE_SERVICE_ROLE_KEY` or `TELEGRAM_BOT_TOKEN` in a `NEXT_PUBLIC_*` variable, frontend code, or GitHub. Keep real secrets only in Render Environment.
+Render supplies `PORT` automatically. `FRONTEND_ORIGIN` is optional because the app and API share the same origin.
 
-## Local development
-Install all workspace dependencies from the repository root with `npm install`. Run the Next.js frontend and Express API separately for local development, or run the production start command after building.
+## Payment notes
 
-## Current scope
-The current code is a marketplace foundation: public product browsing, vendor registration and product APIs, Telegram image upload/proxy, and admin moderation APIs. Customer authentication screens, checkout/payment flows, and complete vendor/admin dashboards are not yet implemented.
+Checkout currently supports cash on delivery and a bank-transfer option that records the order for manual verification. It does **not** connect to ABA PayWay, KHQR, Stripe, or another payment processor. An administrator must verify a bank transfer and update the payment status in the dashboard. Do not describe an order as paid until payment has actually been confirmed.
+
+## API overview
+
+- `GET /health`
+- `GET /api/products`, `GET /api/products/:id`, `GET /api/categories`
+- `GET /api/me`, `PATCH /api/me`
+- `POST /api/vendors/register`
+- `GET /api/vendor/products`, `POST /api/products`, `PATCH/DELETE /api/products/:id`
+- `POST/DELETE /api/products/:id/images...`
+- `POST /api/orders`, `GET /api/orders`
+- `GET /api/vendor/orders`, `PATCH /api/vendor/orders/:orderId`
+- `GET /api/admin/overview`, `GET /api/admin/vendors`, `PATCH /api/admin/vendors/:id`
+- `GET /api/admin/products`, `PATCH /api/admin/products/:id`
+- `GET /api/admin/orders`, `PATCH /api/admin/orders/:id`
+
+## Important
+
+This is the functional marketplace foundation. Real online payment gateway integration, shipping carrier integration, email/SMS notifications, refunds, tax rules, and full accounting are not configured. Configure and test those integrations before accepting live paid orders. Keep the Supabase service-role key and Telegram token only in Render's secret environment variables.
