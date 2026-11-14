@@ -13,7 +13,6 @@
   "scripts": {
     "build": "npm run build --workspace frontend",
     "start": "node backend/server.js",
-    "dev": "concurrently \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\"",
     "check": "node --check backend/server.js"
   }
 }
