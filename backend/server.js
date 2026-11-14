@@ -4,10 +4,15 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
+import next from 'next';
+import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 const port = Number(process.env.PORT || 10000);
+const frontendDir = fileURLToPath(new URL('../frontend', import.meta.url));
+const nextApp = next({ dev: process.env.NODE_ENV !== 'production', dir: frontendDir });
+const nextHandler = nextApp.getRequestHandler();
 const supabaseUrl = process.env.SUPABASE_URL;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = supabaseUrl && serviceKey ? createClient(supabaseUrl, serviceKey) : null;
@@ -71,7 +76,31 @@ async function deleteTelegramMessage(messageId) {
   try { await telegram('deleteMessage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TELEGRAM_CHANNEL_ID, message_id: Number(messageId) }) }); } catch {}
 }
 
-app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'EcomStore API' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'EcomStore' }));
+
+// Proxy Telegram images so the bot token and Telegram file paths stay server-side.
+app.get('/api/images/:fileId', async (req, res) => {
+  try {
+    const fileId = String(req.params.fileId || '');
+    if (!fileId || fileId.length > 2048) return fail(res, 400, 'Invalid image ID');
+    const file = await telegram('getFile', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ file_id: fileId })
+    });
+    if (!file.file_path) return fail(res, 404, 'Image not found');
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const imageResponse = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+    if (!imageResponse.ok) return fail(res, 502, 'Could not retrieve image');
+    const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
+    const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    return res.send(imageBuffer);
+  } catch {
+    return fail(res, 502, 'Image service unavailable');
+  }
+});
 
 app.get('/api/products', async (req, res) => {
   if (!db(res)) return;
@@ -79,13 +108,20 @@ app.get('/api/products', async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
   const q = String(req.query.q || '').trim().slice(0, 100);
   const category = String(req.query.category || '').trim().slice(0, 80);
-  let query = supabase.from('products').select('id,title,description,price,stock,category,created_at,vendor_id,product_images(id,telegram_message_id,sort_order),vendors!inner(store_name,status)', { count: 'exact' })
+  let query = supabase.from('products').select('id,title,description,price,stock,category,created_at,vendor_id,product_images(id,telegram_message_id,file_id,sort_order),vendors!inner(store_name,status)', { count: 'exact' })
     .eq('status', 'active').eq('vendors.status', 'approved').order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
   if (q) query = query.ilike('title', `%${q.replace(/[%_]/g, '')}%`);
   if (category) query = query.eq('category', category);
   const { data, error, count } = await query;
   if (error) return fail(res, 500, 'Could not load products');
-  res.json({ data: data || [], page, limit, total: count || 0 });
+  const products = (data || []).map(product => ({
+    ...product,
+    product_images: (product.product_images || []).map(image => ({
+      ...image,
+      image_url: image.file_id ? `/api/images/${encodeURIComponent(image.file_id)}` : null
+    }))
+  }));
+  res.json({ data: products, page, limit, total: count || 0 });
 });
 
 app.post('/api/vendors/register', authenticate, async (req, res) => {
@@ -210,8 +246,13 @@ app.patch('/api/admin/products/:id', authenticate, async (req, res) => {
   res.json({ data });
 });
 
+await nextApp.prepare();
+app.use((req, res) => nextHandler(req, res));
+
 app.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError) return fail(res, 400, err.message);
+  console.error('EcomStore request error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
-app.listen(port, () => console.log(`EcomStore API listening on ${port}`));
+
+app.listen(port, () => console.log(`EcomStore full-stack service listening on ${port}`));
