@@ -35,8 +35,16 @@ async function authenticate(req, res, next) {
     if (!token || !supabase) return fail(res, 401, 'Authentication required');
     const { data, error } = await supabase.auth.getUser(token);
     if (error || !data.user) return fail(res, 401, 'Invalid or expired session');
+    const { error: profileError } = await supabase.from('profiles').upsert({
+      id: data.user.id,
+      display_name: data.user.user_metadata?.display_name || data.user.email?.split('@')[0] || 'Customer'
+    }, { onConflict: 'id', ignoreDuplicates: true });
+    if (profileError) {
+      console.error('Profile initialization failed:', profileError.message);
+      return fail(res, 500, 'Could not initialize account profile');
+    }
     req.user = data.user;
-    next();
+    return next();
   } catch { return fail(res, 401, 'Authentication failed'); }
 }
 async function vendorFor(userId) {
