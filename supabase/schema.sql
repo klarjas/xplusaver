@@ -195,6 +195,11 @@ grant execute on function public.place_marketplace_order(uuid,text,text,text,tex
 drop policy if exists "vendors_read_approved" on public.vendors;
 create policy "vendors_read_approved" on public.vendors for select
 using (status = 'approved' or user_id = auth.uid());
+alter table public.order_items add column if not exists fulfillment_status text not null default 'pending';
+alter table public.order_items drop constraint if exists order_items_fulfillment_status_check;
+alter table public.order_items add constraint order_items_fulfillment_status_check
+  check (fulfillment_status in ('pending','processing','shipped','completed','cancelled'));
+
 drop policy if exists "orders_vendor_select" on public.orders;
 create policy "orders_vendor_select" on public.orders for select
 using (exists (select 1 from public.order_items oi join public.vendors v on v.id = oi.vendor_id
